@@ -1,6 +1,5 @@
 from fastapi import APIRouter
 import numpy as np
-import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
@@ -10,21 +9,72 @@ from app.routes.stocks import find_stock
 router = APIRouter(prefix='/predictions', tags=['predictions'])
 
 
-def build_features(history: list[float]) -> tuple[pd.DataFrame, pd.Series]:
-    series = pd.Series(history, dtype=float)
+def build_features(history: list[float]) -> tuple[np.ndarray, np.ndarray]:
+    series = np.asarray(history, dtype=float)
     if len(series) < 10:
-        series = pd.Series([series.iloc[-1]] * 10, dtype=float)
+        series = np.full(10, series[-1], dtype=float)
 
-    df = pd.DataFrame({'close': series})
-    df['return'] = df['close'].pct_change()
-    df['rsi'] = 100 - (100 / (1 + df['return'].rolling(14).mean().abs()))
-    df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
-    df['sma_20'] = df['close'].rolling(20).mean()
-    df['volatility'] = df['return'].rolling(10).std()
-    df = df.dropna().reset_index(drop=True)
-    df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
-    features = df[['return', 'rsi', 'ema_12', 'sma_20', 'volatility']]
-    target = df['target']
+    close = series
+    returns = np.zeros_like(close)
+    returns[1:] = np.diff(close) / close[:-1]
+
+    def ema(values: np.ndarray, span: int) -> np.ndarray:
+        alpha = 2 / (span + 1)
+        result = np.empty_like(values)
+        result[0] = values[0]
+        for i in range(1, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i - 1]
+        return result
+
+    def rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
+        if len(values) < window:
+            return np.full(len(values), np.nan)
+        result = np.full(len(values), np.nan)
+        for i in range(window - 1, len(values)):
+            result[i] = values[i - window + 1:i + 1].mean()
+        return result
+
+    def rolling_std(values: np.ndarray, window: int) -> np.ndarray:
+        if len(values) < window:
+            return np.full(len(values), np.nan)
+        result = np.full(len(values), np.nan)
+        for i in range(window - 1, len(values)):
+            result[i] = values[i - window + 1:i + 1].std(ddof=0)
+        return result
+
+    rsi = np.full_like(close, np.nan)
+    if len(close) >= 14:
+        avg_gain = np.zeros(len(close))
+        avg_loss = np.zeros(len(close))
+        gains = np.maximum(returns, 0)
+        losses = np.maximum(-returns, 0)
+        avg_gain[13] = gains[:14].mean()
+        avg_loss[13] = losses[:14].mean()
+        for i in range(14, len(close)):
+            avg_gain[i] = (avg_gain[i - 1] * 13 + gains[i]) / 14
+            avg_loss[i] = (avg_loss[i - 1] * 13 + losses[i]) / 14
+        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
+        rsi = 100 - (100 / (1 + rs))
+
+    ema_12 = ema(close, 12)
+    sma_20 = rolling_mean(close, 20)
+    volatility = rolling_std(returns, 10)
+
+    target = np.zeros(len(close), dtype=int)
+    target[:-1] = (close[1:] > close[:-1]).astype(int)
+
+    valid = ~np.isnan(np.vstack((returns, rsi, ema_12, sma_20, volatility)).T).any(axis=1)
+    valid = valid[:-1]
+
+    features = np.column_stack((
+        returns[:-1][valid],
+        rsi[:-1][valid],
+        ema_12[:-1][valid],
+        sma_20[:-1][valid],
+        volatility[:-1][valid],
+    ))
+    target = target[:-1][valid]
+
     return features, target
 
 
